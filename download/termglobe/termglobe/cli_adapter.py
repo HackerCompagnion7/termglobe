@@ -228,9 +228,10 @@ def _patched_loop(self):
     self.renderer.clear_screen()
 
     import time
+    import signal as _signal
     try:
-        signal.signal(signal.SIGWINCH, self._on_sigwinch)
-    except (OSError, ValueError):
+        _signal.signal(_signal.SIGWINCH, self._on_sigwinch)
+    except (OSError, ValueError, AttributeError):
         pass
 
     try:
