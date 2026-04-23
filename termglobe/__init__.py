@@ -1,8 +1,11 @@
 """
-termglobe - Lightweight 3D ASCII globe renderer for terminal.
+termglobe - Lightweight 3D ASCII globe renderer with Earth colors.
 
-A minimal 3D rendering engine that displays a rotating globe
-using ASCII characters, with geographic pin markers.
+Displays a rotating Earth-like globe in the terminal with:
+- Blue oceans, green land, white ice caps, tan deserts
+- Proper circular globe shape with outline
+- Geographic pin markers
+- Interactive keyboard controls
 
 Basic usage:
     from termglobe import Globe, run
@@ -28,17 +31,9 @@ class Globe:
     Provides the simplest API for creating and running a globe.
     """
 
-    def __init__(self, resolution: int = 20, use_gridlines: bool = True,
+    def __init__(self, resolution: int = 40, use_gridlines: bool = True,
                  fps: float = 24.0, speed: float = 0.03,
                  camera_distance: float = 3.0):
-        """
-        Args:
-            resolution: Sphere point density (default 20 = ~800 points).
-            use_gridlines: Show meridian/parallel lines.
-            fps: Target frames per second.
-            speed: Rotation speed in radians/frame.
-            camera_distance: Camera distance in radius units.
-        """
         if use_gridlines:
             self._model = GlobeWithGridlines(resolution=resolution)
         else:
@@ -49,7 +44,7 @@ class Globe:
             fps=fps,
             rotation_speed=speed,
             camera_distance=camera_distance,
-            use_gridlines=False,  # globe already created
+            use_gridlines=False,
         )
 
     def add_pin(self, lat: float, lon: float, label: str = "") -> int:
@@ -74,7 +69,7 @@ class Globe:
 
         import sys
         sys.stderr.write("""
-termglobe - 3D ASCII Globe
+termglobe - 3D Colored ASCII Globe
 Controls:
   SPACE  Toggle rotation     r/s  Start/Stop
   +/-    Speed up/down       x/y/z  Rotation axis
@@ -89,12 +84,7 @@ Controls:
 
 
 def run(globe: Globe = None, **kwargs):
-    """Convenience function to create and run a globe.
-
-    Args:
-        globe: Existing Globe instance (creates one if None).
-        **kwargs: Passed to Globe() constructor if globe is None.
-    """
+    """Convenience function to create and run a globe."""
     if globe is None:
         globe = Globe(**kwargs)
     globe.run()
@@ -116,4 +106,4 @@ __all__ = [
     "main",
 ]
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

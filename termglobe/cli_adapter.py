@@ -95,8 +95,8 @@ class CLIAdapter:
                             help="Rotation speed radians/frame (default: 0.03)")
         parser.add_argument("--axis", choices=["x", "y", "z"], default="y",
                             help="Rotation axis (default: y)")
-        parser.add_argument("--resolution", type=int, default=20,
-                            help="Sphere resolution (default: 20)")
+        parser.add_argument("--resolution", type=int, default=40,
+                            help="Sphere resolution (default: 40)")
         parser.add_argument("--distance", type=float, default=3.0,
                             help="Camera distance multiplier (default: 3.0)")
         parser.add_argument("--no-grid", action="store_true",

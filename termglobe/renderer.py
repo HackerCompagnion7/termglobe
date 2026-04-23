@@ -1,16 +1,13 @@
 """
-termglobe.renderer - Terminal rendering with double buffering and ASCII shading.
+termglobe.renderer - Terminal rendering with ANSI color support and double buffering.
 
-Manages the 2D character buffer, depth buffer, shading gradient,
-and ANSI escape sequences for flicker-free rendering.
+Renders colored ASCII globe: blue oceans, green/brown land, white ice caps,
+with proper circular outline and flicker-free double buffering.
 """
 
 import sys
 import os
 from typing import Optional
-
-# ASCII shading gradient: from dim (far) to bright (near)
-DEFAULT_SHADE = " .:-=+*#%@"
 
 # Pin marker character
 PIN_CHAR = "\u25cf"  # ●
@@ -21,6 +18,32 @@ ESC_HIDE_CURSOR = "\033[?25l"
 ESC_SHOW_CURSOR = "\033[?25h"
 ESC_RESET = "\033[0m"
 ESC_CLEAR = "\033[2J"
+
+# ANSI 256-color codes
+# Ocean: deep blue to medium blue
+COLOR_OCEAN_DEEP = "\033[38;5;17m"    # very dark blue (edge/far)
+COLOR_OCEAN_MID = "\033[38;5;19m"     # dark blue
+COLOR_OCEAN_LIGHT = "\033[38;5;26m"   # medium blue (front/near)
+# Land: dark green to bright green
+COLOR_LAND_DEEP = "\033[38;5;22m"     # dark green (edge)
+COLOR_LAND_MID = "\033[38;5;28m"      # medium green
+COLOR_LAND_LIGHT = "\033[38;5;34m"    # bright green (front)
+# Ice/snow
+COLOR_ICE = "\033[38;5;231m"          # white
+# Desert/arid
+COLOR_DESERT = "\033[38;5;136m"       # tan/brown
+# Pin marker
+COLOR_PIN = "\033[38;5;196m"          # red
+# Grid lines
+COLOR_GRID = "\033[38;5;59m"          # dim gray-blue
+# Border/outline
+COLOR_BORDER = "\033[38;5;75m"        # light blue outline
+
+# Terrain type constants
+T_OCEAN = 0
+T_LAND = 1
+T_ICE = 2
+T_DESERT = 3
 
 
 def get_terminal_size() -> tuple:
@@ -33,85 +56,86 @@ def get_terminal_size() -> tuple:
 
 
 class Buffer2D:
-    """Double buffer with depth testing for ASCII rendering.
+    """Double buffer with depth testing and ANSI color support.
 
-    Each cell stores a character and a depth value (z).
-    When writing, a pixel is only accepted if its z is closer
-    (lower) than the existing value.
+    Each cell stores: character, color code, and depth value.
     """
 
     def __init__(self, cols: int = 80, rows: int = 24):
         self.cols = cols
         self.rows = rows
         self._char_buf: list = []
+        self._color_buf: list = []
         self._depth_buf: list = []
         self._allocate()
 
     def _allocate(self):
-        """Allocate buffer arrays."""
         space = " "
         self._char_buf = [space] * (self.cols * self.rows)
+        self._color_buf = [""] * (self.cols * self.rows)
         self._depth_buf = [float("inf")] * (self.cols * self.rows)
 
     def clear(self):
-        """Reset both buffers for a new frame."""
         space = " "
         for i in range(self.cols * self.rows):
             self._char_buf[i] = space
+            self._color_buf[i] = ""
             self._depth_buf[i] = float("inf")
 
     def resize(self, cols: int, rows: int):
-        """Resize buffers (re-allocates)."""
         self.cols = cols
         self.rows = rows
         self._allocate()
 
-    def set_pixel(self, col: int, row: int, z: float, char: str, force: bool = False):
-        """Write a pixel if it passes the depth test.
-
-        Args:
-            col: Column index (0-based).
-            row: Row index (0-based).
-            z: Depth value (lower = closer).
-            char: Character to write.
-            force: If True, skip depth test (for pins etc.).
-        """
+    def set_pixel(self, col: int, row: int, z: float, char: str,
+                  color: str = "", force: bool = False):
         if col < 0 or col >= self.cols or row < 0 or row >= self.rows:
             return
         idx = row * self.cols + col
         if force or z < self._depth_buf[idx]:
             self._depth_buf[idx] = z
             self._char_buf[idx] = char
-
-    def get_char(self, col: int, row: int) -> str:
-        """Get character at position."""
-        if col < 0 or col >= self.cols or row < 0 or row >= self.rows:
-            return " "
-        return self._char_buf[row * self.cols + col]
+            self._color_buf[idx] = color
 
     def build_frame_string(self) -> str:
-        """Build the complete frame as a single string with cursor movement.
+        """Build frame with ANSI color codes, minimizing escape sequences."""
+        parts = [ESC_CURSOR_HOME]
+        prev_color = None
+        total = self.cols * self.rows
 
-        Uses ESC[H to move cursor home and writes row-by-row.
-        """
-        lines = []
         for row in range(self.rows):
             start = row * self.cols
             end = start + self.cols
-            line = "".join(self._char_buf[start:end])
-            lines.append(line)
-        return ESC_CURSOR_HOME + "\n".join(lines)
+            for i in range(start, end):
+                ch = self._char_buf[i]
+                color = self._color_buf[i]
+                if color != prev_color:
+                    if color:
+                        parts.append(color)
+                    else:
+                        parts.append(ESC_RESET)
+                    prev_color = color
+                parts.append(ch)
+            if row < self.rows - 1:
+                parts.append("\n")
+
+        parts.append(ESC_RESET)
+        return "".join(parts)
 
 
 class Renderer:
-    """High-level renderer that combines buffer, shading, and output.
+    """High-level renderer with ANSI color support."""
 
-    Renders 3D points onto the ASCII buffer with perspective
-    projection, depth testing, and ASCII shading.
-    """
+    # Ocean shading chars (dark to bright)
+    OCEAN_SHADE = " .:-~=#%"
+    # Land shading chars
+    LAND_SHADE = " .:,;+*#"
+    # Ice shading chars
+    ICE_SHADE = " .:-=+*#"
+    # Desert shading chars
+    DESERT_SHADE = " .:-=+*#"
 
-    def __init__(self, shade: str = DEFAULT_SHADE, pin_char: str = PIN_CHAR):
-        self.shade = shade
+    def __init__(self, pin_char: str = PIN_CHAR):
         self.pin_char = pin_char
         cols, rows = get_terminal_size()
         self.buffer = Buffer2D(cols, rows)
@@ -124,48 +148,60 @@ class Renderer:
     def rows(self) -> int:
         return self.buffer.rows
 
-    def shade_char(self, z_norm: float) -> str:
-        """Map normalized depth [0,1] to ASCII shade character.
+    def get_shade(self, terrain: int, z_norm: float) -> tuple:
+        """Get (character, ANSI color) for a terrain type and depth.
 
         Args:
-            z_norm: 0 = farthest (edge), 1 = closest (front).
-
-        Returns:
-            Single character from the shade gradient.
+            terrain: T_OCEAN, T_LAND, T_ICE, or T_DESERT
+            z_norm: 0.0 = edge (far), 1.0 = front (near)
         """
         if z_norm < 0:
             z_norm = 0.0
-        if z_norm > 1:
+        if z_norm > 1.0:
             z_norm = 1.0
-        idx = int(z_norm * (len(self.shade) - 1))
-        return self.shade[idx]
+
+        if terrain == T_OCEAN:
+            shade = self.OCEAN_SHADE
+            n = len(shade) - 1
+            si = int(z_norm * n)
+            if z_norm < 0.3:
+                color = COLOR_OCEAN_DEEP
+            elif z_norm < 0.65:
+                color = COLOR_OCEAN_MID
+            else:
+                color = COLOR_OCEAN_LIGHT
+            return shade[si], color
+
+        elif terrain == T_LAND:
+            shade = self.LAND_SHADE
+            n = len(shade) - 1
+            si = int(z_norm * n)
+            if z_norm < 0.3:
+                color = COLOR_LAND_DEEP
+            elif z_norm < 0.65:
+                color = COLOR_LAND_MID
+            else:
+                color = COLOR_LAND_LIGHT
+            return shade[si], color
+
+        elif terrain == T_ICE:
+            shade = self.ICE_SHADE
+            n = len(shade) - 1
+            si = int(z_norm * n)
+            return shade[si], COLOR_ICE
+
+        elif terrain == T_DESERT:
+            shade = self.DESERT_SHADE
+            n = len(shade) - 1
+            si = int(z_norm * n)
+            return shade[si], COLOR_DESERT
+
+        return " ", ""
 
     def clear(self):
-        """Clear buffer for new frame."""
         self.buffer.clear()
 
-    def draw_point(self, screen_x: float, screen_y: float,
-                   z_depth: float, z_norm: float, is_pin: bool = False):
-        """Project a screen-space point onto the buffer.
-
-        Args:
-            screen_x: Projected X coordinate (0 = center).
-            screen_y: Projected Y coordinate (0 = center).
-            z_depth: Raw z value for depth testing.
-            z_norm: Normalized z [0,1] for shading.
-            is_pin: If True, draw pin marker instead of shade.
-        """
-        # Convert from centered coords to buffer coords
-        # Character aspect ratio: chars are ~2x taller than wide
-        # so we compensate by halving the y offset
-        col = int(screen_x + self.cols / 2)
-        row = int(-screen_y * 0.5 + self.rows / 2)  # flip Y, half for aspect
-
-        char = self.pin_char if is_pin else self.shade_char(z_norm)
-        self.buffer.set_pixel(col, row, z_depth, char, force=is_pin)
-
     def flush(self, file=None):
-        """Write the frame to stdout with cursor home positioning."""
         if file is None:
             file = sys.stdout
         frame = self.buffer.build_frame_string()
@@ -173,11 +209,6 @@ class Renderer:
         file.flush()
 
     def check_resize(self) -> bool:
-        """Check if terminal resized and update buffers.
-
-        Returns:
-            True if resized.
-        """
         cols, rows = get_terminal_size()
         if cols != self.buffer.cols or rows != self.buffer.rows:
             self.buffer.resize(cols, rows)
@@ -185,21 +216,18 @@ class Renderer:
         return False
 
     def hide_cursor(self, file=None):
-        """Hide the terminal cursor."""
         if file is None:
             file = sys.stdout
         file.write(ESC_HIDE_CURSOR)
         file.flush()
 
     def show_cursor(self, file=None):
-        """Show the terminal cursor."""
         if file is None:
             file = sys.stdout
         file.write(ESC_SHOW_CURSOR)
         file.flush()
 
     def clear_screen(self, file=None):
-        """Clear the entire terminal screen."""
         if file is None:
             file = sys.stdout
         file.write(ESC_CLEAR + ESC_CURSOR_HOME)

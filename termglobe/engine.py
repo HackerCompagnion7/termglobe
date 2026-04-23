@@ -1,8 +1,8 @@
 """
-termglobe.engine - Render loop, FPS control, and state management.
+termglobe.engine - Render loop with colored Earth globe rendering.
 
-Orchestrates the globe rotation, point transformation pipeline,
-and coordinates between GlobeModel and Renderer.
+Orchestrates rotation, perspective projection, terrain-based coloring,
+circular outline drawing, and depth-sorted ASCII rendering.
 """
 
 import math
@@ -13,7 +13,8 @@ from typing import Optional, Callable, List, Tuple
 from enum import Enum
 
 from .math_core import Vec3, latlon_to_xyz
-from .renderer import Renderer, PIN_CHAR
+from .renderer import (Renderer, PIN_CHAR, T_OCEAN, T_LAND, T_ICE, T_DESERT,
+                       COLOR_PIN, COLOR_GRID, COLOR_BORDER, COLOR_OCEAN_DEEP)
 from .globe_model import GlobeModel, GlobeWithGridlines
 
 
@@ -24,14 +25,14 @@ class RotationAxis(Enum):
 
 
 class Engine:
-    """Main engine that drives the render loop.
+    """Main engine that drives the colored render loop.
 
-    Manages globe state (rotation angle, speed), FPS timing,
-    and the per-frame pipeline: rotate -> cull -> project -> rasterize -> flush.
-
-    The render pipeline is inlined for performance: instead of calling
-    rot_y/rot_x/project per point (which creates Vec3/Vec2 objects),
-    we operate on raw float tuples directly.
+    Renders an Earth-like globe with:
+    - Blue oceans, green land, white ice, tan desert
+    - Proper circular outline
+    - Perspective shading (brighter = closer)
+    - Pin markers in red
+    - Gridlines in dim gray
     """
 
     def __init__(self, globe: Optional[GlobeModel] = None,
@@ -71,22 +72,19 @@ class Engine:
         self._resize_count = 0
         self._check_resize_every = 10
 
-        # Precomputed flat arrays for fast rendering
-        # Each point is stored as (x, y, z) tuple
+        # Precomputed flat arrays
         self._surface_xyz: List[Tuple[float, float, float]] = []
+        self._surface_terrain: List[int] = []
         self._grid_xyz: List[Tuple[float, float, float]] = []
         self._pin_xyz: List[Tuple[float, float, float]] = []
         self._rebuild_arrays()
 
-        # Shading gradient
-        self._shade = " .:-=+*#%@"
-        self._shade_len = len(self._shade) - 1
-
     def _rebuild_arrays(self):
-        """Convert Vec3 points to flat tuples for fast access."""
+        """Convert model data to flat arrays for fast rendering."""
         self._surface_xyz = [(p.x, p.y, p.z) for p in self.globe.get_surface_points()]
+        self._surface_terrain = list(self.globe._surface_terrain)
         if isinstance(self.globe, GlobeWithGridlines):
-            self._grid_xyz = [(p.x, p.y, p.z) for p in self.globe.get_grid_points()]
+            self._grid_xyz = list(self.globe.get_grid_points())
         else:
             self._grid_xyz = []
         self._pin_xyz = [(pin.xyz(self.globe.radius).x,
@@ -200,7 +198,7 @@ class Engine:
                 self._fps_timer = now
 
     def _render_frame(self):
-        """Optimized render: inline rotation and projection for speed."""
+        """Render the colored Earth globe with proper circular shape."""
         buf = self.renderer.buffer
         buf.clear()
 
@@ -209,9 +207,10 @@ class Engine:
         half_cols = cols * 0.5
         half_rows = rows * 0.5
 
-        # Scale: fit globe in 80% of available width
-        # Use cols as primary constraint for a wider, more visible globe
-        scale = cols * 0.35
+        # Scale: make the globe fill the terminal nicely
+        # Characters are ~2:1 (taller than wide), so we adjust
+        min_dim = min(cols, rows * 2)  # account for char aspect ratio
+        scale = min_dim * 0.7
         d = self.camera_distance
         r = self.globe.radius
         inv_r = 1.0 / r if r > 0 else 1.0
@@ -225,16 +224,40 @@ class Engine:
         cx = math.cos(ax); sx = math.sin(ax)
         cz = math.cos(az); sz = math.sin(az)
 
-        shade = self._shade
-        shade_len = self._shade_len
         char_buf = buf._char_buf
+        color_buf = buf._color_buf
         depth_buf = buf._depth_buf
-        pin_char = PIN_CHAR
 
-        # Process all point sets in one loop
-        all_points = self._surface_xyz + self._grid_xyz
+        # ---- Step 1: Draw circular outline ----
+        # The outline is the silhouette of the sphere.
+        # For a sphere of radius r at camera distance d,
+        # the projected radius is: r * scale / d
+        proj_r = r / d * scale
+        proj_r_y = proj_r * 0.5  # aspect ratio correction
 
-        for px, py, pz in all_points:
+        # Draw outline using Bresenham-like circle algorithm
+        n_outline = max(60, int(proj_r * 4))
+        for i in range(n_outline):
+            angle = 2 * math.pi * i / n_outline
+            oc = int(half_cols + proj_r * math.cos(angle))
+            orow = int(half_rows - proj_r_y * math.sin(angle))
+            if 0 <= oc < cols and 0 <= orow < rows:
+                idx = orow * cols + oc
+                # Outline goes at depth = 0 (edge of sphere)
+                if depth_buf[idx] > 0.01:
+                    depth_buf[idx] = 0.01
+                    char_buf[idx] = "@"
+                    color_buf[idx] = COLOR_BORDER
+
+        # ---- Step 2: Render surface points with terrain colors ----
+        surface = self._surface_xyz
+        terrain = self._surface_terrain
+        n_pts = len(surface)
+
+        for pi in range(n_pts):
+            px, py, pz = surface[pi]
+            t = terrain[pi]
+
             # Rot Y
             x1 = px * cy + pz * sy
             y1 = py
@@ -250,7 +273,7 @@ class Engine:
             y3 = x2 * sz + y2 * cz
             z3 = z2
 
-            # Visibility
+            # Only render front-facing points
             if z3 <= 0:
                 continue
 
@@ -271,14 +294,49 @@ class Engine:
             idx = row * cols + col
             if z3 < depth_buf[idx]:
                 depth_buf[idx] = z3
-                # Shading
+                # Normalized depth for shading
                 z_norm = z3 * inv_r
                 if z_norm > 1.0:
                     z_norm = 1.0
-                si = int(z_norm * shade_len)
-                char_buf[idx] = shade[si]
+                # Get shade char and color from renderer
+                ch, color = self.renderer.get_shade(t, z_norm)
+                char_buf[idx] = ch
+                color_buf[idx] = color
 
-        # Process pins (force draw on top)
+        # ---- Step 3: Render gridlines ----
+        for px, py, pz in self._grid_xyz:
+            x1 = px * cy + pz * sy
+            y1 = py
+            z1 = -px * sy + pz * cy
+
+            x2 = x1
+            y2 = y1 * cx - z1 * sx
+            z2 = y1 * sx + z1 * cx
+
+            x3 = x2 * cz - y2 * sz
+            y3 = x2 * sz + y2 * cz
+            z3 = z2
+
+            if z3 <= 0:
+                continue
+
+            denom = z3 + d
+            if denom <= 1e-6:
+                continue
+
+            col = int(x3 / denom * scale + half_cols)
+            row = int(-y3 / denom * scale * 0.5 + half_rows)
+
+            if 0 <= col < cols and 0 <= row < rows:
+                idx = row * cols + col
+                # Gridlines only overwrite ocean, not land
+                if depth_buf[idx] != float("inf") and char_buf[idx] != "@" :
+                    if z3 < depth_buf[idx] * 1.05:  # slight tolerance
+                        depth_buf[idx] = z3
+                        char_buf[idx] = ":"
+                        color_buf[idx] = COLOR_GRID
+
+        # ---- Step 4: Render pins (always on top) ----
         for px, py, pz in self._pin_xyz:
             x1 = px * cy + pz * sy
             y1 = py
@@ -305,7 +363,8 @@ class Engine:
             if 0 <= col < cols and 0 <= row < rows:
                 idx = row * cols + col
                 depth_buf[idx] = z3
-                char_buf[idx] = pin_char
+                char_buf[idx] = PIN_CHAR
+                color_buf[idx] = COLOR_PIN
 
         # Flush
         self.renderer.flush()
