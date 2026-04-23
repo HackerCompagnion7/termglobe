@@ -105,8 +105,9 @@ class Engine:
         self.renderer.clear_screen()
 
         try:
-            signal.signal(signal.SIGWINCH, self._on_sigwinch)
-        except (OSError, ValueError):
+            if hasattr(signal, 'SIGWINCH'):
+                signal.signal(signal.SIGWINCH, self._on_sigwinch)
+        except (OSError, ValueError, AttributeError):
             pass
 
         try:

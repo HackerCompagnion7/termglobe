@@ -8,6 +8,7 @@ and the main entry point for running termglobe from the shell.
 import argparse
 import sys
 import os
+import signal
 import select
 import termios
 import tty
@@ -229,8 +230,9 @@ def _patched_loop(self):
 
     import time
     try:
-        signal.signal(signal.SIGWINCH, self._on_sigwinch)
-    except (OSError, ValueError):
+        if hasattr(signal, 'SIGWINCH'):
+            signal.signal(signal.SIGWINCH, self._on_sigwinch)
+    except (OSError, ValueError, AttributeError):
         pass
 
     try:
@@ -294,8 +296,6 @@ Engine._handle_key = _handle_key
 
 def main():
     """Entry point for the termglobe command."""
-    import signal
-
     adapter = CLIAdapter()
 
     # Create engine with keyboard support
